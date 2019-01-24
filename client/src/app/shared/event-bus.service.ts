@@ -63,13 +63,13 @@ export class EventBusService {
             switch (state) {
                 case WebSocket.OPEN:
                     this.state = EventBusService.STATE_OPEN;
-                    this.enablePing(true);
+                    // this.enablePing(true);
                     this.flushEventQueue();
                     this.open.emit(null);
                     break;
                 case WebSocket.CLOSED:
                     this.state = EventBusService.STATE_CLOSED;
-                    this.enablePing(false);
+                    // this.enablePing(false);
                     this.close.emit(null);
                     break;
 
