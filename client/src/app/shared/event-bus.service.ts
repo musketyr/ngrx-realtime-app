@@ -4,10 +4,7 @@
  */
 
 import {EventEmitter, Injectable} from '@angular/core';
-// We removed sockjs-client dependencies to workaround compilation issue, so the following must be added to index.html
-// <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.1.5/sockjs.min.js"></script>
-// import * as SockJS from 'sockjs-client';
-declare var SockJS;
+import {ObservableWebSocket} from "./observable-web-socket.model";
 
 @Injectable()
 export class EventBusService {
@@ -27,26 +24,18 @@ export class EventBusService {
 
     public close: EventEmitter<any> = new EventEmitter<any>();
     public open: EventEmitter<any> = new EventEmitter<any>();
-    public reconnect: EventEmitter<any> = new EventEmitter<any>();
 
     private defaultHeaders: any;
     private eventQueue: QueuedEvent[];
     private handlers: any = {};
     private replyHandlers: any = {};
-    private sockJS;
+    private webSocket: ObservableWebSocket;
     private state: number;
 
     private pingInterval = 5000;
     private pingTimerID = null;
 
-    private maxReconnectAttempts = Infinity;
     private randomizationFactor = 0.5;
-    private reconnectAttempts = 0;
-    private reconnectDelayMax = 5000;
-    private reconnectDelayMin = 1000;
-    private reconnectEnabled = false;
-    private reconnectExponent = 2;
-    private reconnectTimerID = null;
 
     constructor() {
         if (EventBusService.initialized) {
@@ -61,126 +50,96 @@ export class EventBusService {
 
     connect(url: string, defaultHeaders: any = null, options: any = {}): void {
         this.pingInterval = options.vertxbus_ping_interval || 5000;
-
-        this.maxReconnectAttempts = options.vertxbus_reconnect_attempts_max || Infinity;
         this.randomizationFactor = options.vertxbus_randomization_factor || 0.5;
-        this.reconnectAttempts = 0;
-        this.reconnectDelayMax = options.vertxbus_reconnect_delay_max || 5000;
-        this.reconnectDelayMin = options.vertxbus_reconnect_delay_min || 1000;
-        this.reconnectExponent = options.vertxbus_reconnect_exponent || 2;
-        this.reconnectTimerID = null;
-
         this.defaultHeaders = defaultHeaders;
         this.eventQueue = [];
         this.handlers = {};
         this.replyHandlers = {};
 
-        const setupConnection = () => {
-            this.sockJS = new SockJS(url, null, options);
-            this.state = EventBusService.STATE_CONNECTING;
+        this.webSocket = new ObservableWebSocket(url);
+        this.state = EventBusService.STATE_CONNECTING;
 
-            this.sockJS.onopen = () => {
-                this.state = EventBusService.STATE_OPEN;
-                this.enablePing(true);
-                this.flushEventQueue();
-                this.open.emit(null);
-                if (this.reconnectTimerID) {
-                    this.reconnectAttempts = 0;
-                    // fire separate event for reconnects
-                    // consistent behavior with adding handlers onopen
-                    this.reconnect.emit(null);
-                }
-            };
+        this.webSocket.state.subscribe((state) => {
+            switch (state) {
+                case WebSocket.OPEN:
+                    this.state = EventBusService.STATE_OPEN;
+                    this.enablePing(true);
+                    this.flushEventQueue();
+                    this.open.emit(null);
+                    break;
+                case WebSocket.CLOSED:
+                    this.state = EventBusService.STATE_CLOSED;
+                    this.enablePing(false);
+                    this.close.emit(null);
+                    break;
 
-            this.sockJS.onclose = (e) => {
-                this.state = EventBusService.STATE_CLOSED;
-                this.enablePing(false);
-                if (this.reconnectEnabled && this.reconnectAttempts < this.maxReconnectAttempts) {
-                    this.sockJS = null;
-                    // set id so users can cancel
-                    this.reconnectTimerID = setTimeout(setupConnection, this.getReconnectDelay());
-                    ++this.reconnectAttempts;
-                }
-                this.close.emit(null);
-            };
+            }
+        });
 
-            this.sockJS.onmessage = (e) => {
-                const json = JSON.parse(e.data);
+        this.webSocket.messages.subscribe((message) => {
+            console.debug("Got message from WS: ", message);
+            const json = JSON.parse(message);
 
-                // define a reply function on the message itself
-                if (json.replyAddress) {
-                    Object.defineProperty(json, 'reply', {
-                        value: function (message, headers, callback) {
-                            this.send(json.replyAddress, message, headers, callback);
-                        }
-                    });
-                }
-
-                if (this.handlers[json.address]) {
-                    // iterate all registered handlers
-                    const handlers = this.handlers[json.address];
-                    for (let i = 0; i < handlers.length; i++) {
-                        if (json.type === 'err') {
-                            handlers[i]({
-                                failureCode: json.failureCode,
-                                failureType: json.failureType,
-                                message: json.message
-                            });
-                        } else {
-                            handlers[i](null, json);
-                        }
+            // define a reply function on the message itself
+            if (json.replyAddress) {
+                Object.defineProperty(json, 'reply', {
+                    value: function (message, headers, callback) {
+                        this.send(json.replyAddress, message, headers, callback);
                     }
-                } else if (this.replyHandlers[json.address]) {
-                    // Might be a reply message
-                    const handler = this.replyHandlers[json.address];
-                    delete this.replyHandlers[json.address];
+                });
+            }
+
+            if (this.handlers[json.address]) {
+                // iterate all registered handlers
+                const handlers = this.handlers[json.address];
+                for (let i = 0; i < handlers.length; i++) {
                     if (json.type === 'err') {
-                        handler({failureCode: json.failureCode, failureType: json.failureType, message: json.message});
+                        handlers[i]({
+                            failureCode: json.failureCode,
+                            failureType: json.failureType,
+                            message: json.message
+                        });
                     } else {
-                        handler(null, json);
+                        handlers[i](null, json);
+                    }
+                }
+            } else if (this.replyHandlers[json.address]) {
+                // Might be a reply message
+                const handler = this.replyHandlers[json.address];
+                delete this.replyHandlers[json.address];
+                if (json.type === 'err') {
+                    handler({failureCode: json.failureCode, failureType: json.failureType, message: json.message});
+                } else {
+                    handler(null, json);
+                }
+            } else {
+                if (json.type === 'err') {
+                    try {
+                        console.error(json);
+                    } catch (e) {
+                        // dev tools are disabled so we cannot use console on IE
                     }
                 } else {
-                    if (json.type === 'err') {
-                        try {
-                            console.error(json);
-                        } catch (e) {
-                            // dev tools are disabled so we cannot use console on IE
-                        }
-                    } else {
-                        try {
-                            console.warn('No handler found for message: ', json);
-                        } catch (e) {
-                            // dev tools are disabled so we cannot use console on IE
-                        }
+                    try {
+                        console.warn('No handler found for message: ', json);
+                    } catch (e) {
+                        // dev tools are disabled so we cannot use console on IE
                     }
                 }
-            };
-        };
+            }
+        });
 
-        setupConnection();
+        this.webSocket.connect();
     }
 
     disconnect() {
-        if (this.sockJS) {
-            this.state = EventBusService.STATE_CLOSING;
-            this.enableReconnect(false);
-            this.sockJS.close();
-        }
-    }
-
-    enableReconnect(enabled) {
-        this.reconnectEnabled = enabled;
-        if (!enabled && this.reconnectTimerID) {
-            clearTimeout(this.reconnectTimerID);
-            this.reconnectTimerID = null;
-            this.reconnectAttempts = 0;
-        }
+        this.webSocket.disconnect();
     }
 
     enablePing(enabled) {
         if (enabled) {
             const sendPing = () => {
-                this.sockJS.send(JSON.stringify({type: 'ping'}));
+                this.webSocket.send(JSON.stringify({type: 'ping'}));
             };
 
             if (this.pingInterval > 0) {
@@ -214,7 +173,7 @@ export class EventBusService {
                 type: EventBusService.TYPE_PUBLISH
             };
 
-            this.sockJS.send(JSON.stringify(message));
+            this.webSocket.send(JSON.stringify(message));
         } else {
             this.addEventToQueue({address, body, type: EventBusService.TYPE_PUBLISH});
         }
@@ -246,7 +205,7 @@ export class EventBusService {
                 this.replyHandlers[replyAddress] = replyHandler;
             }
 
-            this.sockJS.send(JSON.stringify(message));
+            this.webSocket.send(JSON.stringify(message));
         } else {
             this.addEventToQueue({address, handler: replyHandler, body, type: EventBusService.TYPE_SEND});
         }
@@ -273,7 +232,7 @@ export class EventBusService {
                 type: EventBusService.TYPE_REGISTER
             };
 
-            this.sockJS.send(JSON.stringify(envelope));
+            this.webSocket.send(JSON.stringify(envelope));
         }
     }
 
@@ -315,7 +274,7 @@ export class EventBusService {
                 type: EventBusService.TYPE_UNREGISTER
             };
 
-            this.sockJS.send(JSON.stringify(envelope));
+            this.webSocket.send(JSON.stringify(envelope));
         }
 
         delete this.handlers[address];
@@ -360,16 +319,6 @@ export class EventBusService {
             // Remove oldest events from the queue
             this.eventQueue.splice(0, this.eventQueue.length - EventBusService.MAX_EVENT_QUEUE_SIZE);
         }
-    }
-
-    private getReconnectDelay() {
-        let ms = this.reconnectDelayMin * Math.pow(this.reconnectExponent, this.reconnectAttempts);
-        if (this.randomizationFactor) {
-            const rand = Math.random();
-            const deviation = Math.floor(rand * this.randomizationFactor * ms);
-            ms = (Math.floor(rand * 10) & 1) === 0 ? ms - deviation : ms + deviation;
-        }
-        return Math.min(ms, this.reconnectDelayMax) | 0;
     }
 
     private flushEventQueue() {
