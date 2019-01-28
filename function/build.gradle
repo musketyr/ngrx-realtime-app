@@ -1,10 +1,11 @@
+import jp.classmethod.aws.gradle.lambda.AWSLambdaMigrateFunctionTask
+
 plugins {
     id "io.spring.dependency-management" version "1.0.6.RELEASE"
     id "com.github.johnrengelman.shadow" version "4.0.2"
     id "jp.classmethod.aws.lambda" version "0.38"	
 }
 
-apply plugin:"application"
 apply plugin:"groovy"
 
 version "0.1"
@@ -49,34 +50,40 @@ shadowJar {
     mergeServiceFiles()
 }
 
-run.jvmArgs('-noverify', '-XX:TieredStopAtLevel=1')
-shadowJar {
-    transform(com.github.jengelman.gradle.plugins.shadow.transformers.Log4j2PluginsCacheFileTransformer)
-}
-mainClassName = "lambda.eventbus.LambdaEchoFunction"
-applicationDefaultJvmArgs = [""]
-
-jar {
-    manifest {
-        attributes 'Main-Class': mainClassName
-    }
-}
-
 aws {
     region = 'eu-west-1'
 }
 
 if(new File("${System.getProperty("user.home")}/.aws/credentials").exists()) {
-    task deploy(type: jp.classmethod.aws.gradle.lambda.AWSLambdaMigrateFunctionTask, dependsOn: shadowJar) {
-        functionName = "Echo"
-        handler = "lambda.eventbus.EventbusFunction::lambdaEventbus"
+    task deployProducer(
+        type: AWSLambdaMigrateFunctionTask, 
+        dependsOn: shadowJar
+    ) {
+        functionName = "EventBusProducer"
+        handler = "lambda.eventbus.EventBusProducerFunction::produce"
         role = "arn:aws:iam::${aws.accountId}:role/lambda_ws_sns"
         runtime = com.amazonaws.services.lambda.model.Runtime.Java8
         zipFile = shadowJar.archivePath
         memorySize = 512
         timeout = 60
     }
+    
+    task deployConsumer(
+        type: AWSLambdaMigrateFunctionTask,
+        dependsOn: shadowJar
+    ) {
+        functionName = "EventBusConsumer"
+        handler = "lambda.eventbus.EventBusConsumerFunction::consume"
+        role = "arn:aws:iam::${aws.accountId}:role/lambda_ws_sns"
+        runtime = com.amazonaws.services.lambda.model.Runtime.Java8
+        zipFile = shadowJar.archivePath
+        memorySize = 512
+        timeout = 60
+    }
+
+    task deploy(dependsOn: [deployProducer, deployConsumer])
 }
+
 tasks.withType(GroovyCompile) {
     groovyOptions.forkOptions.jvmArgs.add('-Dgroovy.parameters=true')
 }
