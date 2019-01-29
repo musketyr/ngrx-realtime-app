@@ -63,13 +63,11 @@ export class EventBusService {
             switch (state) {
                 case WebSocket.OPEN:
                     this.state = EventBusService.STATE_OPEN;
-                    // this.enablePing(true);
                     this.flushEventQueue();
                     this.open.emit(null);
                     break;
                 case WebSocket.CLOSED:
                     this.state = EventBusService.STATE_CLOSED;
-                    // this.enablePing(false);
                     this.close.emit(null);
                     break;
 
@@ -77,7 +75,6 @@ export class EventBusService {
         });
 
         this.webSocket.messages.subscribe((message) => {
-            console.debug("Got message from WS: ", message);
             const json = JSON.parse(message);
 
             // define a reply function on the message itself
@@ -134,25 +131,6 @@ export class EventBusService {
 
     disconnect() {
         this.webSocket.disconnect();
-    }
-
-    enablePing(enabled) {
-        if (enabled) {
-            const sendPing = () => {
-                this.webSocket.send(JSON.stringify({type: 'ping'}));
-            };
-
-            if (this.pingInterval > 0) {
-                // Send the first ping then send a ping every pingInterval milliseconds
-                sendPing();
-                this.pingTimerID = setInterval(sendPing, this.pingInterval);
-            }
-        } else {
-            if (this.pingTimerID) {
-                clearInterval(this.pingTimerID);
-                this.pingTimerID = null;
-            }
-        }
     }
 
     /**
