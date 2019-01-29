@@ -75,6 +75,7 @@ export class EventBusService {
         });
 
         this.webSocket.messages.subscribe((message) => {
+            console.debug("Got message from WS at", new Date().getTime(), ": ", message);
             const json = JSON.parse(message);
 
             // define a reply function on the message itself
@@ -151,6 +152,7 @@ export class EventBusService {
                 type: EventBusService.TYPE_PUBLISH
             };
 
+            console.debug("Publishing message to WS at", new Date().getTime(), ": ", body);
             this.webSocket.send(JSON.stringify(message));
         } else {
             this.addEventToQueue({address, body, type: EventBusService.TYPE_PUBLISH});
